@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 
 from nltk.tokenize import WordPunctTokenizer
+from nltk.translate.bleu_score import corpus_bleu
 
 # from subword_nmt.learn_bpe import learn_bpe
 from subword_nmt.apply_bpe import BPE
@@ -355,17 +356,14 @@ def compute_loss(model: nn.Module, inp: torch.Tensor, out: torch.Tensor) -> torc
     return cross_entropy[mask].mean()
 
 
-# def compute_bleu(model, inp_lines, out_lines, bpe_sep='@@ '):
-#     with torch.no_grad():
-#         # translations, _ = model.translate_lines(inp_lines)
-#
-#         translations = [line.replace(bpe_sep, '') for line in translations]
-#         actual = [line.replace(bpe_sep, '') for line in out_lines]
-#         return corpus_bleu(
-#             [[ref.split()] for ref in actual],
-#             [trans.split() for trans in translations],
-#             smoothing_function=lambda precisions, **kw: [p + 1.0 / p.denominator for p in precisions]
-#             ) * 100
+def compute_bleu(model, inp_lines: list[str] | np.ndarray[str], out_lines: list[str] | np.ndarray[str], bpe_sep: str = '@@ '):
+    with torch.no_grad():
+        translations = [model.translate(line).replace(bpe_sep, '') for line in inp_lines]
+        actual = [line.replace(bpe_sep, '') for line in out_lines]
+        return corpus_bleu(
+            list_of_references=[[ref.split()] for ref in actual],
+            hypotheses=[trans.split() for trans in translations],
+        ) * 100
 
 
 def main():
