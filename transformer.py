@@ -1,7 +1,4 @@
-import typing
-
 import numpy as np
-from tqdm import trange
 
 import torch
 import torch.nn as nn
@@ -10,14 +7,18 @@ from torch.utils.data import Dataset, DataLoader
 
 from sklearn.model_selection import train_test_split
 
-device = 'cpu'
-
 from nltk.tokenize import WordPunctTokenizer
 
 # from subword_nmt.learn_bpe import learn_bpe
-# from subword_nmt.apply_bpe import BPE
+from subword_nmt.apply_bpe import BPE
+
+device = 'cpu'
 
 tokenizer = WordPunctTokenizer()
+
+bpe = {}
+for lang in ['en', 'ru']:
+    bpe[lang] = BPE(open('./bpe_rules.' + lang))
 
 
 def tokenize(x: str) -> str:
@@ -48,9 +49,14 @@ class Vocab:
         return len(self.vocab)
 
     def tokenize(self, text: str) -> list[str]:
+        """
+        just splits the text by a whitespace and adds start and end tokens
+        :param text: input text (assumed that bpe has already been applied) TODO
+        :return: list of tokens
+        """
         return [self.bos] + text.split() + [self.eos]
 
-    def to_matrix(self, texts: np.ndarray[str]) -> torch.Tensor:
+    def to_matrix(self, texts: np.ndarray[str] | list[str]) -> torch.Tensor:
         batch_size = len(texts)
         tokenized_texts = [self.tokenize(text) for text in texts]
         lengths = [len(text) for text in tokenized_texts]
@@ -279,6 +285,8 @@ class Transformer(nn.Module):
         """
         super().__init__()
         self.d_model = d_model
+        self.max_seq_len = max_seq_len
+
         self.inp_vocab = inp_vocab
         self.out_vocab = out_vocab
 
@@ -315,6 +323,22 @@ class Transformer(nn.Module):
         output_logits = self.fc(decoder_output)  # (batch_size, d_model)
         return output_logits
 
+    def translate(self, inp_text: str) -> str:
+        inp_text_after_bpe = bpe['ru'].process_line(inp_text.lower())
+        inp_matrix = self.inp_vocab.to_matrix([inp_text_after_bpe]).to(device)
+
+        translated_tokens = [self.out_vocab.bos]  # initialize the target sequence with the start token
+        for _ in range(self.max_seq_len):
+            out_matrix = torch.LongTensor(
+                [self.out_vocab.token_to_index[token] for token in translated_tokens], device=device
+            ).unsqueeze(0)
+            output_logits = self.forward(inp_matrix, out_matrix)
+            next_token_idx = output_logits[:, -1, :].argmax(dim=-1).item()  # take the most likely next token
+            if next_token_idx == self.out_vocab.eos_idx:
+                break
+            translated_tokens.append(self.out_vocab.vocab[next_token_idx])
+
+        return ' '.join(translated_tokens)
 
 
 def compute_loss(model: nn.Module, inp: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
@@ -331,9 +355,22 @@ def compute_loss(model: nn.Module, inp: torch.Tensor, out: torch.Tensor) -> torc
     return cross_entropy[mask].mean()
 
 
+# def compute_bleu(model, inp_lines, out_lines, bpe_sep='@@ '):
+#     with torch.no_grad():
+#         # translations, _ = model.translate_lines(inp_lines)
+#
+#         translations = [line.replace(bpe_sep, '') for line in translations]
+#         actual = [line.replace(bpe_sep, '') for line in out_lines]
+#         return corpus_bleu(
+#             [[ref.split()] for ref in actual],
+#             [trans.split() for trans in translations],
+#             smoothing_function=lambda precisions, **kw: [p + 1.0 / p.denominator for p in precisions]
+#             ) * 100
+
+
 def main():
-    data_inp = np.array(open('../../train.bpe.ru').read().split('\n'))
-    data_out = np.array(open('../../train.bpe.en').read().split('\n'))
+    data_inp = np.array(open('train.bpe.ru').read().split('\n'))
+    data_out = np.array(open('train.bpe.en').read().split('\n'))
 
     # numpy arrays
     train_inp, val_inp, train_out, val_out = train_test_split(data_inp, data_out, test_size=3000, random_state=42)
