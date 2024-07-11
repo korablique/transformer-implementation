@@ -1,3 +1,5 @@
+import typing
+
 import numpy as np
 from tqdm import trange
 
@@ -18,7 +20,11 @@ from nltk.tokenize import WordPunctTokenizer
 tokenizer = WordPunctTokenizer()
 
 
-def tokenize(x):
+def tokenize(x: str) -> str:
+    """
+    :param x: text
+    :return: tokenized text, tokens are separated by whitespace
+    """
     return ' '.join(tokenizer.tokenize(x.lower()))
 
 
@@ -41,7 +47,7 @@ class Vocab:
     def __len__(self) -> int:
         return len(self.vocab)
 
-    def tokenize(self, text: str):
+    def tokenize(self, text: str) -> list[str]:
         return [self.bos] + text.split() + [self.eos]
 
     def to_matrix(self, texts: np.ndarray[str]) -> torch.Tensor:
@@ -64,7 +70,7 @@ class Vocab:
             result.append(' '.join(tokens))
         return result
 
-    def compute_mask(self, input_idxs):
+    def compute_mask(self, input_idxs: torch.Tensor) -> torch.Tensor:
         """
         compute a boolean mask that equals True until the first EOS including it
         """
@@ -76,30 +82,30 @@ class TextsDataset(Dataset):
         assert len(inp_texts) == len(out_texts), 'inp_texts and out_texts must be the same size'
         self.inp_texts = inp_texts
         self.out_texts = out_texts
-        # self.inp_vocab = inp_vocab
+        # self.inp_vocab = inp_vocab TODO
         # self.out_vocab = out_vocab
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.inp_texts)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int):
         return self.inp_texts[idx], self.out_texts[idx]  # input string and output string
 
 
 class FeedForward(nn.Module):
-    def __init__(self, d_model=512, d_ff=2048):
+    def __init__(self, d_model: int = 512, d_ff: int = 2048):
         super().__init__()
 
         self.fc1 = nn.Linear(d_model, d_ff)
         self.act = nn.ReLU()
         self.fc2 = nn.Linear(d_ff, d_model)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc2(self.act(self.fc1(x)))
 
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, max_seq_len, d_model=512, n=10000):
+    def __init__(self, max_seq_len: int, d_model: int = 512, n: int = 10000):
         """
         :param max_seq_len: max possible sequence length
         :param d_model:
@@ -110,7 +116,7 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', self._generate_pe(max_seq_len, d_model, n))
 
     @staticmethod
-    def _generate_pe(max_seq_len, d_model, n):
+    def _generate_pe(max_seq_len: int, d_model: int, n: int) -> torch.Tensor:
         pe = np.zeros((max_seq_len, d_model))
         token_index = np.arange(max_seq_len)[:, np.newaxis]  # (max_seq_len, 1)
         col_index = np.arange(d_model // 2)
@@ -120,7 +126,7 @@ class PositionalEncoding(nn.Module):
         pe[:, 1::2] = np.cos(token_index / divider)
         return torch.tensor(pe, dtype=torch.float32)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         :param x: input embeddings (batch_size, seq_len, d_model)
         """
@@ -129,11 +135,11 @@ class PositionalEncoding(nn.Module):
 
 
 class ScaledDotProductAttention(nn.Module):
-    def __init__(self, d_model=512, d_k=128, d_v=256):
+    def __init__(self, d_k: int = 128):
         super().__init__()
         self.d_k = d_k
 
-    def forward(self, Q, K, V, mask=None):
+    def forward(self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         """
         :returns: attention weights
         """
@@ -144,7 +150,7 @@ class ScaledDotProductAttention(nn.Module):
             # which correspond to illegal connections
             attn_scores += mask
 
-        attn_weights = F.softmax(attn_scores, dim=-1)   # (batch_size, seq_len, seq_len)
+        attn_weights = F.softmax(attn_scores, dim=-1)  # (batch_size, seq_len, seq_len)
         output = torch.bmm(attn_weights, V)  # (batch_size, seq_len, d_v)
         return output
 
@@ -156,10 +162,10 @@ class MultiHeadAttention(nn.Module):
         self.Q_proj = nn.ModuleList([nn.Linear(d_model, d_k) for _ in range(n_heads)])
         self.K_proj = nn.ModuleList([nn.Linear(d_model, d_k) for _ in range(n_heads)])
         self.V_proj = nn.ModuleList([nn.Linear(d_model, d_v) for _ in range(n_heads)])
-        self.attn_layers = nn.ModuleList([ScaledDotProductAttention(d_model, d_k, d_v) for _ in range(n_heads)])
+        self.attn_layers = nn.ModuleList([ScaledDotProductAttention(d_k) for _ in range(n_heads)])
         self.final_fc = nn.Linear(d_v * n_heads, d_model)
 
-    def forward(self, Q, K, V, mask=None):
+    def forward(self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         attn_outputs = []  # tensors of shape (batch_size, seq_len, d_v)
         for i in range(self.n_heads):
             Q_proj = self.Q_proj[i](Q)  # (batch_size, seq_len, d_k)
@@ -185,7 +191,7 @@ class EncoderLayer(nn.Module):
         self.layer_norm1 = nn.LayerNorm(normalized_shape=d_model)
         self.layer_norm2 = nn.LayerNorm(normalized_shape=d_model)
 
-    def forward(self, input_embs):
+    def forward(self, input_embs: torch.Tensor) -> torch.Tensor:
         """
         :param input_embs: input embeddings (batch_size, seq_len, d_model)
         :return:
@@ -227,7 +233,7 @@ class DecoderLayer(nn.Module):
         self.layer_norm2 = nn.LayerNorm(d_model)
         self.layer_norm3 = nn.LayerNorm(d_model)
 
-    def forward(self, output_embs, encoder_output):
+    def forward(self, output_embs: torch.Tensor, encoder_output: torch.Tensor) -> torch.Tensor:
         # masked self attention sublayer
         Q = self.query1(output_embs)  # (batch_size, seq_len, d_model)
         K = self.key1(output_embs)
@@ -287,10 +293,10 @@ class Transformer(nn.Module):
 
         self.fc = nn.Linear(d_model, len(out_vocab))
 
-    def forward(self, inputs, outputs):
+    def forward(self, inputs: torch.Tensor, outputs: torch.Tensor) -> torch.Tensor:
         """
-        :param inputs: input sequence of tokens (batch_size, seq_len)
-        :param outputs: target sequence on train and start token on inference (batch_size, seq_len)
+        :param inputs: input sequence of token indices (batch_size, seq_len)
+        :param outputs: target sequence on train and start token index on inference (batch_size, seq_len)
         """
         input_embs = self.input_emb(inputs) * np.sqrt(self.d_model)  # (batch_size, seq_len, d_model)
         input_embs = self.dropout(self.pos_enc(input_embs))  # add positional embeddings
@@ -310,7 +316,8 @@ class Transformer(nn.Module):
         return output_logits
 
 
-def compute_loss(model, inp, out):
+
+def compute_loss(model: nn.Module, inp: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
     """
     :param model:
     :param inp: input tokens matrix
