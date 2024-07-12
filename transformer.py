@@ -12,6 +12,7 @@ from nltk.translate.bleu_score import corpus_bleu
 
 # from subword_nmt.learn_bpe import learn_bpe
 from subword_nmt.apply_bpe import BPE
+from tqdm import trange
 
 device = 'cpu'
 
@@ -84,13 +85,11 @@ class Vocab:
         return torch.cumsum(input_idxs == self.eos_idx, dim=-1) <= 1
 
 
-class TextsDataset(Dataset):
-    def __init__(self, inp_texts: np.ndarray[str], out_texts: np.ndarray[str], inp_vocab: Vocab, out_vocab: Vocab):
+class TranslationDataset(Dataset):
+    def __init__(self, inp_texts: np.ndarray[str], out_texts: np.ndarray[str]):
         assert len(inp_texts) == len(out_texts), 'inp_texts and out_texts must be the same size'
         self.inp_texts = inp_texts
         self.out_texts = out_texts
-        # self.inp_vocab = inp_vocab TODO
-        # self.out_vocab = out_vocab
 
     def __len__(self) -> int:
         return len(self.inp_texts)
@@ -247,7 +246,7 @@ class DecoderLayer(nn.Module):
         V = self.value1(output_embs)
 
         seq_len = output_embs.size(1)
-        mask = torch.triu(torch.ones(seq_len, seq_len) * float('-inf'), diagonal=1)  # (seq_len, seq_len)
+        mask = torch.triu(torch.ones(seq_len, seq_len) * float('-inf'), diagonal=1).to(device)  # (seq_len, seq_len)
 
         masked_self_attn = output_embs + self.masked_self_attn(Q, K, V, mask)
         masked_self_attn = F.dropout(masked_self_attn, p=0.1)
@@ -325,21 +324,39 @@ class Transformer(nn.Module):
         return output_logits
 
     def translate(self, inp_text: str) -> str:
-        inp_text_after_bpe = bpe['ru'].process_line(inp_text.lower())
-        inp_matrix = self.inp_vocab.to_matrix([inp_text_after_bpe]).to(device)
+        """
+        inference function
+        :param inp_text: input string
+        :return: translated string
+        """
+        with torch.no_grad():
+            # text to tensor
+            inp_text_after_bpe = bpe['ru'].process_line(inp_text.lower())
+            inp_matrix = self.inp_vocab.to_matrix([inp_text_after_bpe]).to(device)
 
-        translated_tokens = [self.out_vocab.bos]  # initialize the target sequence with the start token
-        for _ in range(self.max_seq_len):
-            out_matrix = torch.LongTensor(
-                [self.out_vocab.token_to_index[token] for token in translated_tokens], device=device
-            ).unsqueeze(0)
-            output_logits = self.forward(inp_matrix, out_matrix)
-            next_token_idx = output_logits[:, -1, :].argmax(dim=-1).item()  # take the most likely next token
-            if next_token_idx == self.out_vocab.eos_idx:
-                break
-            translated_tokens.append(self.out_vocab.vocab[next_token_idx])
+            # encode input text
+            input_embs = self.input_emb(inp_matrix) * np.sqrt(self.d_model)  # (batch_size, seq_len, d_model)
+            input_embs = self.pos_enc(input_embs)  # add positional embeddings
+            encoder_output = input_embs
+            for layer in self.encoder:
+                encoder_output = layer(encoder_output)
 
-        return ' '.join(translated_tokens)
+            # decoding loop
+            translated_tokens = [self.out_vocab.bos_idx]  # initialize the target sequence with the start token
+            for _ in range(self.max_seq_len):
+                out_matrix = torch.LongTensor(translated_tokens).unsqueeze(0).to(device)
+                output_embs = self.output_emb(out_matrix)
+                output_embs = self.pos_enc(output_embs)
+                decoder_output = output_embs
+                for layer in self.decoder:
+                    decoder_output = layer(decoder_output, encoder_output)
+
+                # predict next token
+                next_token_idx = self.fc(decoder_output)[:, -1, :].argmax(dim=1).item()  # the most likely next token
+                if next_token_idx == self.out_vocab.eos_idx:
+                    break
+                translated_tokens.append(next_token_idx)
+            return ' '.join([self.out_vocab.vocab[token_idx] for token_idx in translated_tokens])
 
 
 def compute_loss(model: nn.Module, inp: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
@@ -357,13 +374,12 @@ def compute_loss(model: nn.Module, inp: torch.Tensor, out: torch.Tensor) -> torc
 
 
 def compute_bleu(model, inp_lines: list[str] | np.ndarray[str], out_lines: list[str] | np.ndarray[str], bpe_sep: str = '@@ '):
-    with torch.no_grad():
-        translations = [model.translate(line).replace(bpe_sep, '') for line in inp_lines]
-        actual = [line.replace(bpe_sep, '') for line in out_lines]
-        return corpus_bleu(
-            list_of_references=[[ref.split()] for ref in actual],
-            hypotheses=[trans.split() for trans in translations],
-        ) * 100
+    translations = [model.translate(line).replace(bpe_sep, '') for line in inp_lines]
+    actual = [line.replace(bpe_sep, '') for line in out_lines]
+    return corpus_bleu(
+        list_of_references=[[ref.split()] for ref in actual],
+        hypotheses=[trans.split() for trans in translations],
+    ) * 100
 
 
 def main():
@@ -377,26 +393,53 @@ def main():
     out_vocab = Vocab(train_out)
 
     batch_size = 4
-    train_dataset = TextsDataset(train_inp, train_out, inp_vocab, out_vocab)
+    train_dataset = TranslationDataset(train_inp, train_out)
 
     def collate_fn(data):
         inp_texts, out_texts = zip(*data)
-        inp_batch = inp_vocab.to_matrix(inp_texts)
-        out_batch = out_vocab.to_matrix(out_texts)
+        inp_batch = inp_vocab.to_matrix(inp_texts).to(device)
+        out_batch = out_vocab.to_matrix(out_texts).to(device)
         return inp_batch, out_batch
 
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
-    model = Transformer(inp_vocab=inp_vocab, out_vocab=out_vocab, d_model=16, n_layers=6, n_heads=2, max_seq_len=1000)
+    model = Transformer(
+        inp_vocab=inp_vocab,
+        out_vocab=out_vocab,
+        d_model=16,
+        d_k=16,
+        d_v=16,
+        d_ff=64,
+        n_layers=6,
+        n_heads=2,
+        max_seq_len=110
+    ).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-    for batch_i, (inp_batch, out_batch) in enumerate(train_dataloader):
-        inp_batch.to(device)
-        out_batch.to(device)
-        loss = compute_loss(model, inp_batch, out_batch)
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
+    metrics = {'train_loss': [], 'val_loss': [], 'val_bleu': []}
+    n_epochs = 1
+
+    val_inp_tensor = inp_vocab.to_matrix(val_inp).to(device)
+    val_out_tensor = out_vocab.to_matrix(val_out).to(device)
+
+    for epoch in trange(n_epochs):
+        model.train()
+        for batch_i, (inp_batch, out_batch) in enumerate(train_dataloader):
+            loss = compute_loss(model, inp_batch, out_batch)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+
+            metrics['train_loss'].append((batch_i, loss.item()))
+
+        model.eval()
+        with torch.no_grad():
+            bleu = compute_bleu(model, val_inp, val_out)
+            metrics['val_bleu'].append((epoch, bleu))
+
+            val_loss = compute_loss(model, val_inp_tensor, val_out_tensor)
+            metrics['val_loss'].append((epoch, val_loss))
+        print("Mean loss=%.3f" % np.mean(metrics['train_loss'][-10:], axis=0)[1], flush=True)
 
 
 if __name__ == '__main__':
