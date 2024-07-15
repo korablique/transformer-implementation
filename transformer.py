@@ -379,6 +379,7 @@ def compute_bleu(model, inp_lines: list[str] | np.ndarray[str], out_lines: list[
     return corpus_bleu(
         list_of_references=[[ref.split()] for ref in actual],
         hypotheses=[trans.split() for trans in translations],
+        smoothing_function=lambda precisions, **kw: [p + 1.0 / p.denominator for p in precisions]
     ) * 100
 
 
