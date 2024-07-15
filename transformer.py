@@ -420,32 +420,31 @@ def main():
     n_epochs = 1
     val_dataloader = DataLoader(TranslationDataset(val_inp, val_out), batch_size=batch_size, shuffle=False,
                                 collate_fn=collate_fn)
+    current_step = 0
 
+    model.train()
     for epoch in range(n_epochs):
-        model.train()
-        train_loss = 0.
-        batch_count = 0
-        for (inp_batch, out_batch) in tqdm(train_dataloader, desc=f'Epoch {epoch}'):
+        for inp_batch, out_batch in tqdm(train_dataloader, desc=f'Epoch {epoch}'):
             loss = compute_loss(model, inp_batch, out_batch)
 
             opt.zero_grad()
             loss.backward()
             opt.step()
 
-            train_loss += loss.item()
-            batch_count += 1
-        print("train_loss", train_loss / batch_count, epoch)
+            print("train_loss", loss, current_step)
+            current_step += 1
 
-        model.eval()
-        val_loss = 0.
-        batch_count = 0
-        with torch.no_grad():
-            for val_inp_batch, val_out_batch in tqdm(val_dataloader):
-                loss = compute_loss(model, val_inp_batch, val_out_batch)
-                val_loss += loss.item()
-                batch_count += 1
-
-            print("val_loss", val_loss / batch_count, epoch)
+            if current_step % 100 == 0:
+                model.eval()
+                val_loss = 0.
+                batch_count = 0
+                with torch.no_grad():
+                    for val_inp_batch, val_out_batch in val_dataloader:
+                        loss = compute_loss(model, val_inp_batch, val_out_batch)
+                        val_loss += loss.item()
+                        batch_count += 1
+                print("val_loss", val_loss / batch_count, epoch)
+                model.train()
 
 
 if __name__ == '__main__':
