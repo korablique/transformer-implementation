@@ -12,7 +12,7 @@ from nltk.translate.bleu_score import corpus_bleu
 
 # from subword_nmt.learn_bpe import learn_bpe
 from subword_nmt.apply_bpe import BPE
-from tqdm import trange
+from tqdm import trange, tqdm
 
 device = 'cpu'
 
@@ -417,30 +417,35 @@ def main():
     ).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-    metrics = {'train_loss': [], 'val_loss': [], 'val_bleu': []}
     n_epochs = 1
+    val_dataloader = DataLoader(TranslationDataset(val_inp, val_out), batch_size=batch_size, shuffle=False,
+                                collate_fn=collate_fn)
 
-    val_inp_tensor = inp_vocab.to_matrix(val_inp).to(device)
-    val_out_tensor = out_vocab.to_matrix(val_out).to(device)
-
-    for epoch in trange(n_epochs):
+    for epoch in range(n_epochs):
         model.train()
-        for batch_i, (inp_batch, out_batch) in enumerate(train_dataloader):
+        train_loss = 0.
+        batch_count = 0
+        for (inp_batch, out_batch) in tqdm(train_dataloader, desc=f'Epoch {epoch}'):
             loss = compute_loss(model, inp_batch, out_batch)
+
             opt.zero_grad()
             loss.backward()
             opt.step()
 
-            metrics['train_loss'].append((batch_i, loss.item()))
+            train_loss += loss.item()
+            batch_count += 1
+        print("train_loss", train_loss / batch_count, epoch)
 
         model.eval()
+        val_loss = 0.
+        batch_count = 0
         with torch.no_grad():
-            bleu = compute_bleu(model, val_inp, val_out)
-            metrics['val_bleu'].append((epoch, bleu))
+            for val_inp_batch, val_out_batch in tqdm(val_dataloader):
+                loss = compute_loss(model, val_inp_batch, val_out_batch)
+                val_loss += loss.item()
+                batch_count += 1
 
-            val_loss = compute_loss(model, val_inp_tensor, val_out_tensor)
-            metrics['val_loss'].append((epoch, val_loss))
-        print("Mean loss=%.3f" % np.mean(metrics['train_loss'][-10:], axis=0)[1], flush=True)
+            print("val_loss", val_loss / batch_count, epoch)
 
 
 if __name__ == '__main__':
