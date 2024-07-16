@@ -383,6 +383,15 @@ def compute_bleu(model, inp_lines: list[str] | np.ndarray[str], out_lines: list[
     ) * 100
 
 
+def compute_lr(d_model, step_num, warmup_steps=4000):
+    return np.power(d_model, -0.5) * min(np.power(step_num, -0.5), step_num * np.power(warmup_steps, -1.5))
+
+
+def set_lr(optimizer, new_lr):
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = new_lr
+
+
 def main():
     data_inp = np.array(open('train.bpe.ru').read().split('\n'))
     data_out = np.array(open('train.bpe.en').read().split('\n'))
@@ -404,10 +413,12 @@ def main():
 
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
+    d_model = 16
+
     model = Transformer(
         inp_vocab=inp_vocab,
         out_vocab=out_vocab,
-        d_model=16,
+        d_model=d_model,
         d_k=16,
         d_v=16,
         d_ff=64,
@@ -415,16 +426,23 @@ def main():
         n_heads=2,
         max_seq_len=110
     ).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3, betas=(0.9, 0.98), eps=1e-9)
 
     n_epochs = 1
     val_dataloader = DataLoader(TranslationDataset(val_inp, val_out), batch_size=batch_size, shuffle=False,
                                 collate_fn=collate_fn)
     current_step = 0
+    warmup_steps = 4000
+    val_steps = 100
 
     model.train()
     for epoch in range(n_epochs):
         for inp_batch, out_batch in tqdm(train_dataloader, desc=f'Epoch {epoch}'):
+            # set lr
+            lr = compute_lr(d_model, current_step + 1, warmup_steps)
+            set_lr(opt, lr)
+
+            # train
             loss = compute_loss(model, inp_batch, out_batch)
 
             opt.zero_grad()
@@ -434,7 +452,8 @@ def main():
             print("train_loss", loss, current_step)
             current_step += 1
 
-            if current_step % 100 == 0:
+            # validation
+            if current_step % val_steps == 0:
                 model.eval()
                 val_loss = 0.
                 batch_count = 0
