@@ -78,9 +78,11 @@ class Vocab:
             result.append(' '.join(tokens))
         return result
 
-    def compute_mask(self, input_idxs: torch.Tensor) -> torch.Tensor:
+    def compute_padding_mask(self, input_idxs: torch.Tensor) -> torch.Tensor:
         """
         compute a boolean mask that equals True until the first EOS including it
+        :param input_idxs: (batch_size, seq_len)
+        :returns: mask of shape (batch_size, seq_len)
         """
         return torch.cumsum(input_idxs == self.eos_idx, dim=-1) <= 1
 
@@ -145,16 +147,27 @@ class ScaledDotProductAttention(nn.Module):
         super().__init__()
         self.d_k = d_k
 
-    def forward(self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+            self,
+            Q: torch.Tensor,
+            K: torch.Tensor,
+            V: torch.Tensor,
+            padding_mask: torch.Tensor,
+            sequence_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
+        :param padding_mask: mask that blocks out padding tokens
+        :param sequence_mask: mask that allows to see only the previous and current tokens
         :returns: attention weights
         """
         attn_scores = Q.matmul(K.transpose(2, 1)) / np.sqrt(self.d_k)  # (batch_size, seq_len, seq_len)
 
-        if mask is not None:
+        attn_scores = attn_scores.masked_fill(padding_mask == 0, float('-inf'))
+
+        if sequence_mask is not None:
             # masking out (setting to −∞) all values in the input of the softmax
             # which correspond to illegal connections
-            attn_scores += mask
+            attn_scores = attn_scores.masked_fill(sequence_mask == 0, float('-inf'))
 
         attn_weights = F.softmax(attn_scores, dim=-1)  # (batch_size, seq_len, seq_len)
         output = torch.bmm(attn_weights, V)  # (batch_size, seq_len, d_v)
@@ -171,13 +184,20 @@ class MultiHeadAttention(nn.Module):
         self.attn_layers = nn.ModuleList([ScaledDotProductAttention(d_k) for _ in range(n_heads)])
         self.final_fc = nn.Linear(d_v * n_heads, d_model)
 
-    def forward(self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+            self,
+            Q: torch.Tensor,
+            K: torch.Tensor,
+            V: torch.Tensor,
+            padding_mask: torch.Tensor,
+            sequence_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         attn_outputs = []  # tensors of shape (batch_size, seq_len, d_v)
         for i in range(self.n_heads):
             Q_proj = self.Q_proj[i](Q)  # (batch_size, seq_len, d_k)
             K_proj = self.K_proj[i](K)  # (batch_size, seq_len, d_k)
             V_proj = self.V_proj[i](V)  # (batch_size, seq_len, d_v)
-            attn_outputs.append(self.attn_layers[i](Q_proj, K_proj, V_proj, mask))
+            attn_outputs.append(self.attn_layers[i](Q_proj, K_proj, V_proj, padding_mask, sequence_mask))
         output = torch.cat(attn_outputs, dim=-1)  # (batch_size, seq_len, d_v * n_heads)
         output = self.final_fc(output)  # (batch_size, seq_len, d_model)
         return output
@@ -197,9 +217,10 @@ class EncoderLayer(nn.Module):
         self.layer_norm1 = nn.LayerNorm(normalized_shape=d_model)
         self.layer_norm2 = nn.LayerNorm(normalized_shape=d_model)
 
-    def forward(self, input_embs: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_embs: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
         """
         :param input_embs: input embeddings (batch_size, seq_len, d_model)
+        :param padding_mask: mask that blocks out padding tokens
         :return:
         """
         # compute Q, K, V matrices (batch_size, seq_len, d_model)
@@ -208,7 +229,7 @@ class EncoderLayer(nn.Module):
         V = self.value(input_embs)
 
         # self attention sublayer
-        output = input_embs + self.self_attn(Q, K, V)  # add residual connection
+        output = input_embs + self.self_attn(Q, K, V, padding_mask)  # add residual connection
         output = F.dropout(output, p=0.1)
         output = self.layer_norm1(output)
 
@@ -239,16 +260,22 @@ class DecoderLayer(nn.Module):
         self.layer_norm2 = nn.LayerNorm(d_model)
         self.layer_norm3 = nn.LayerNorm(d_model)
 
-    def forward(self, output_embs: torch.Tensor, encoder_output: torch.Tensor) -> torch.Tensor:
+    def forward(
+            self,
+            output_embs: torch.Tensor,
+            encoder_output: torch.Tensor,
+            inputs_padding_mask: torch.Tensor | None = None,
+            outputs_padding_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         # masked self attention sublayer
         Q = self.query1(output_embs)  # (batch_size, seq_len, d_model)
         K = self.key1(output_embs)
         V = self.value1(output_embs)
 
         seq_len = output_embs.size(1)
-        mask = torch.triu(torch.ones(seq_len, seq_len) * float('-inf'), diagonal=1).to(device)  # (seq_len, seq_len)
+        sequence_mask = torch.tril(torch.ones(seq_len, seq_len)).to(device)  # (seq_len, seq_len)
 
-        masked_self_attn = output_embs + self.masked_self_attn(Q, K, V, mask)
+        masked_self_attn = output_embs + self.masked_self_attn(Q, K, V, outputs_padding_mask, sequence_mask)
         masked_self_attn = F.dropout(masked_self_attn, p=0.1)
         masked_self_attn = self.layer_norm1(masked_self_attn)
 
@@ -257,7 +284,7 @@ class DecoderLayer(nn.Module):
         K = self.key2(encoder_output)
         V = self.value2(encoder_output)
 
-        enc_dec_attn = output_embs + self.enc_dec_attn(Q, K, V)
+        enc_dec_attn = output_embs + self.enc_dec_attn(Q, K, V, inputs_padding_mask)
         enc_dec_attn = F.dropout(enc_dec_attn, p=0.1)
         enc_dec_attn = self.layer_norm2(enc_dec_attn)
 
@@ -308,17 +335,20 @@ class Transformer(nn.Module):
         """
         input_embs = self.input_emb(inputs) * np.sqrt(self.d_model)  # (batch_size, seq_len, d_model)
         input_embs = self.dropout(self.pos_enc(input_embs))  # add positional embeddings
+        inputs_padding_mask = self.inp_vocab.compute_padding_mask(inputs).unsqueeze(1)
 
         encoder_output = input_embs
         for layer in self.encoder:
-            encoder_output = layer(encoder_output)
+            encoder_output = layer(encoder_output, inputs_padding_mask)
 
         # decoding
         output_embs = self.output_emb(outputs)
         output_embs = self.dropout(self.pos_enc(output_embs))
+        outputs_padding_mask = self.out_vocab.compute_padding_mask(outputs).unsqueeze(1)
+
         decoder_output = output_embs
         for layer in self.decoder:
-            decoder_output = layer(decoder_output, encoder_output)
+            decoder_output = layer(decoder_output, encoder_output, inputs_padding_mask, outputs_padding_mask)
 
         output_logits = self.fc(decoder_output)  # (batch_size, d_model)
         return output_logits
@@ -337,9 +367,10 @@ class Transformer(nn.Module):
             # encode input text
             input_embs = self.input_emb(inp_matrix) * np.sqrt(self.d_model)  # (batch_size, seq_len, d_model)
             input_embs = self.pos_enc(input_embs)  # add positional embeddings
+            inputs_padding_mask = self.inp_vocab.compute_padding_mask(inp_matrix)
             encoder_output = input_embs
             for layer in self.encoder:
-                encoder_output = layer(encoder_output)
+                encoder_output = layer(encoder_output, inputs_padding_mask)
 
             # decoding loop
             translated_tokens = [self.out_vocab.bos_idx]  # initialize the target sequence with the start token
@@ -347,9 +378,10 @@ class Transformer(nn.Module):
                 out_matrix = torch.LongTensor(translated_tokens).unsqueeze(0).to(device)
                 output_embs = self.output_emb(out_matrix)
                 output_embs = self.pos_enc(output_embs)
+                outputs_padding_mask = self.out_vocab.compute_padding_mask(out_matrix)
                 decoder_output = output_embs
                 for layer in self.decoder:
-                    decoder_output = layer(decoder_output, encoder_output)
+                    decoder_output = layer(decoder_output, encoder_output, inputs_padding_mask, outputs_padding_mask)
 
                 # predict next token
                 next_token_idx = self.fc(decoder_output)[:, -1, :].argmax(dim=1).item()  # the most likely next token
@@ -365,7 +397,7 @@ def compute_loss(model: nn.Module, inp: torch.Tensor, out: torch.Tensor) -> torc
     :param inp: input tokens matrix
     :param out: reference tokens matrix
     """
-    mask = model.out_vocab.compute_mask(out)  # (batch_size, out_len), == True until the first EOS including it
+    mask = model.out_vocab.compute_padding_mask(out)  # (batch_size, out_len), == True until the first EOS including it
     logits = model(inp, out)  # (batch_size, out_len, out_vocab_size)
     cross_entropy = F.cross_entropy(logits.transpose(1, 2), out, reduction='none')  # (batch_size, out_len)
 
