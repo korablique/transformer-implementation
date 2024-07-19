@@ -8,7 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 
 from nltk.tokenize import WordPunctTokenizer
-from nltk.translate.bleu_score import corpus_bleu
+from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 
 # from subword_nmt.learn_bpe import learn_bpe
 from subword_nmt.apply_bpe import BPE
@@ -411,7 +411,7 @@ def compute_bleu(model, inp_lines: list[str] | np.ndarray[str], out_lines: list[
     return corpus_bleu(
         list_of_references=[[ref.split()] for ref in actual],
         hypotheses=[trans.split() for trans in translations],
-        smoothing_function=lambda precisions, **kw: [p + 1.0 / p.denominator for p in precisions]
+        smoothing_function=SmoothingFunction().method2,
     ) * 100
 
 
