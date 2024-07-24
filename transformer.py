@@ -266,14 +266,12 @@ class DecoderLayer(nn.Module):
             encoder_output: torch.Tensor,
             inputs_padding_mask: torch.Tensor | None = None,
             outputs_padding_mask: torch.Tensor | None = None,
+            sequence_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # masked self attention sublayer
         Q = self.query1(output_embs)  # (batch_size, seq_len, d_model)
         K = self.key1(output_embs)
         V = self.value1(output_embs)
-
-        seq_len = output_embs.size(1)
-        sequence_mask = torch.tril(torch.ones(seq_len, seq_len)).to(device)  # (seq_len, seq_len)
 
         masked_self_attn = output_embs + self.masked_self_attn(Q, K, V, outputs_padding_mask, sequence_mask)
         masked_self_attn = F.dropout(masked_self_attn, p=0.1)
@@ -346,9 +344,12 @@ class Transformer(nn.Module):
         output_embs = self.dropout(self.pos_enc(output_embs))
         outputs_padding_mask = self.out_vocab.compute_padding_mask(outputs).unsqueeze(1)
 
+        seq_len = output_embs.size(1)
+        sequence_mask = torch.tril(torch.ones(seq_len, seq_len)).to(device)  # (seq_len, seq_len)
+
         decoder_output = output_embs
         for layer in self.decoder:
-            decoder_output = layer(decoder_output, encoder_output, inputs_padding_mask, outputs_padding_mask)
+            decoder_output = layer(decoder_output, encoder_output, inputs_padding_mask, outputs_padding_mask, sequence_mask)
 
         output_logits = self.fc(decoder_output)  # (batch_size, d_model)
         return output_logits
@@ -440,7 +441,7 @@ def main():
     def collate_fn(data):
         inp_texts, out_texts = zip(*data)
         inp_batch = inp_vocab.to_matrix(inp_texts).to(device)
-        out_batch = out_vocab.to_matrix(out_texts).to(device)
+        out_batch = out_vocab.to_matrix(out_texts).to(device)[:, 1:]
         return inp_batch, out_batch
 
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
