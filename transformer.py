@@ -61,13 +61,13 @@ class Vocab:
     def to_matrix(self, texts: np.ndarray[str] | list[str]) -> torch.Tensor:
         batch_size = len(texts)
         tokenized_texts = [self.tokenize(text) for text in texts]
-        lengths = [len(text) for text in tokenized_texts]
+        actual_lengths = [len(text) for text in tokenized_texts]
         # create a matrix of size (batch_size, max_len),
         # where max_len is the length of the longest sequence in the batch
-        matrix = np.full((batch_size, max(lengths)), fill_value=self.eos_idx)  # using EOS as padding token
+        matrix = np.full((batch_size, max(actual_lengths)), fill_value=self.eos_idx)  # using EOS as padding token
 
         for i, tokens in enumerate(tokenized_texts):
-            matrix[i, :lengths[i]] = [self.token_to_index.get(token, self.unk_idx) for token in tokens]
+            matrix[i, :actual_lengths[i]] = [self.token_to_index.get(token, self.unk_idx) for token in tokens]
 
         return torch.from_numpy(matrix)
 
@@ -152,7 +152,7 @@ class ScaledDotProductAttention(nn.Module):
             Q: torch.Tensor,
             K: torch.Tensor,
             V: torch.Tensor,
-            padding_mask: torch.Tensor,
+            padding_mask: torch.Tensor | None = None,
             sequence_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
@@ -162,7 +162,8 @@ class ScaledDotProductAttention(nn.Module):
         """
         attn_scores = Q.matmul(K.transpose(2, 1)) / np.sqrt(self.d_k)  # (batch_size, seq_len, seq_len)
 
-        attn_scores = attn_scores.masked_fill(padding_mask == 0, float('-inf'))
+        if padding_mask is not None:
+            attn_scores = attn_scores.masked_fill(padding_mask == 0, float('-inf'))
 
         if sequence_mask is not None:
             # masking out (setting to −∞) all values in the input of the softmax
@@ -217,19 +218,15 @@ class EncoderLayer(nn.Module):
         self.layer_norm1 = nn.LayerNorm(normalized_shape=d_model)
         self.layer_norm2 = nn.LayerNorm(normalized_shape=d_model)
 
-    def forward(self, input_embs: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_embs: torch.Tensor, padding_mask: torch.Tensor | None = None) -> torch.Tensor:
         """
         :param input_embs: input embeddings (batch_size, seq_len, d_model)
         :param padding_mask: mask that blocks out padding tokens
         :return:
         """
-        # compute Q, K, V matrices (batch_size, seq_len, d_model)
-        Q = self.query(input_embs)
-        K = self.key(input_embs)
-        V = self.value(input_embs)
-
         # self attention sublayer
-        output = input_embs + self.self_attn(Q, K, V, padding_mask)  # add residual connection
+        output = self.self_attn(input_embs, input_embs, input_embs, padding_mask)
+        output += input_embs  # add residual connection
         output = F.dropout(output, p=0.1)
         output = self.layer_norm1(output)
 
@@ -245,14 +242,6 @@ class DecoderLayer(nn.Module):
     def __init__(self, n_heads=8, d_model=512, d_k=128, d_v=256, d_ff=2048):
         super().__init__()
 
-        self.query1 = nn.Linear(d_model, d_model)  # TODO refactoring needed
-        self.key1 = nn.Linear(d_model, d_model)
-        self.value1 = nn.Linear(d_model, d_model)
-
-        self.query2 = nn.Linear(d_model, d_model)
-        self.key2 = nn.Linear(d_model, d_model)
-        self.value2 = nn.Linear(d_model, d_model)
-
         self.enc_dec_attn = MultiHeadAttention(n_heads, d_model, d_k, d_v)
         self.masked_self_attn = MultiHeadAttention(n_heads, d_model, d_k, d_v)
         self.ff = FeedForward(d_model=d_model, d_ff=d_ff)
@@ -262,27 +251,21 @@ class DecoderLayer(nn.Module):
 
     def forward(
             self,
-            output_embs: torch.Tensor,
+            output_embs: torch.Tensor,  # decoder outputs
             encoder_output: torch.Tensor,
             inputs_padding_mask: torch.Tensor | None = None,
             outputs_padding_mask: torch.Tensor | None = None,
             sequence_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # masked self attention sublayer
-        Q = self.query1(output_embs)  # (batch_size, seq_len, d_model)
-        K = self.key1(output_embs)
-        V = self.value1(output_embs)
-
-        masked_self_attn = output_embs + self.masked_self_attn(Q, K, V, outputs_padding_mask, sequence_mask)
+        masked_self_attn = self.masked_self_attn(output_embs, output_embs, output_embs, outputs_padding_mask, sequence_mask)
+        masked_self_attn += output_embs
         masked_self_attn = F.dropout(masked_self_attn, p=0.1)
         masked_self_attn = self.layer_norm1(masked_self_attn)
 
         # encoder-decoder attention sublayer
-        Q = self.query2(masked_self_attn)
-        K = self.key2(encoder_output)
-        V = self.value2(encoder_output)
-
-        enc_dec_attn = output_embs + self.enc_dec_attn(Q, K, V, inputs_padding_mask)
+        enc_dec_attn = self.enc_dec_attn(masked_self_attn, encoder_output, encoder_output, inputs_padding_mask)
+        enc_dec_attn += output_embs
         enc_dec_attn = F.dropout(enc_dec_attn, p=0.1)
         enc_dec_attn = self.layer_norm2(enc_dec_attn)
 
@@ -325,6 +308,7 @@ class Transformer(nn.Module):
         self.decoder = nn.ModuleList([DecoderLayer(n_heads, d_model, d_k, d_v, d_ff) for _ in range(n_layers)])
 
         self.fc = nn.Linear(d_model, len(out_vocab))
+        self.fc.weight = self.output_emb.weight  # share the same weight matrix between embedding layers and the pre-softmax linear transformation
 
     def forward(self, inputs: torch.Tensor, outputs: torch.Tensor) -> torch.Tensor:
         """
@@ -357,21 +341,20 @@ class Transformer(nn.Module):
     def translate(self, inp_text: str) -> str:
         """
         inference function
-        :param inp_text: input string
+        :param inp_text: input string processed with BPE
         :return: translated string
         """
         with torch.no_grad():
             # text to tensor
-            inp_text_after_bpe = bpe['ru'].process_line(inp_text.lower())
-            inp_matrix = self.inp_vocab.to_matrix([inp_text_after_bpe]).to(device)
+            inp_matrix = self.inp_vocab.to_matrix([inp_text]).to(device)
 
             # encode input text
             input_embs = self.input_emb(inp_matrix) * np.sqrt(self.d_model)  # (batch_size, seq_len, d_model)
             input_embs = self.pos_enc(input_embs)  # add positional embeddings
-            inputs_padding_mask = self.inp_vocab.compute_padding_mask(inp_matrix)
+
             encoder_output = input_embs
             for layer in self.encoder:
-                encoder_output = layer(encoder_output, inputs_padding_mask)
+                encoder_output = layer(encoder_output)
 
             # decoding loop
             translated_tokens = [self.out_vocab.bos_idx]  # initialize the target sequence with the start token
@@ -379,10 +362,10 @@ class Transformer(nn.Module):
                 out_matrix = torch.LongTensor(translated_tokens).unsqueeze(0).to(device)
                 output_embs = self.output_emb(out_matrix)
                 output_embs = self.pos_enc(output_embs)
-                outputs_padding_mask = self.out_vocab.compute_padding_mask(out_matrix)
+
                 decoder_output = output_embs
                 for layer in self.decoder:
-                    decoder_output = layer(decoder_output, encoder_output, inputs_padding_mask, outputs_padding_mask)
+                    decoder_output = layer(decoder_output, encoder_output)
 
                 # predict next token
                 next_token_idx = self.fc(decoder_output)[:, -1, :].argmax(dim=1).item()  # the most likely next token
@@ -398,12 +381,11 @@ def compute_loss(model: nn.Module, inp: torch.Tensor, out: torch.Tensor) -> torc
     :param inp: input tokens matrix
     :param out: reference tokens matrix
     """
-    mask = model.out_vocab.compute_padding_mask(out)  # (batch_size, out_len), == True until the first EOS including it
     logits = model(inp, out)  # (batch_size, out_len, out_vocab_size)
-    cross_entropy = F.cross_entropy(logits.transpose(1, 2), out, reduction='none')  # (batch_size, out_len)
-
-    # average cross-entropy over tokens where mask == True
-    return cross_entropy[mask].mean()
+    return F.cross_entropy(
+        logits.contiguous().view(-1, len(model.out_vocab)),
+        out.contiguous().view(-1),
+        ignore_index=model.out_vocab.eos_idx)
 
 
 def compute_bleu(model, inp_lines: list[str] | np.ndarray[str], out_lines: list[str] | np.ndarray[str], bpe_sep: str = '@@ '):
@@ -429,7 +411,6 @@ def main():
     data_inp = np.array(open('train.bpe.ru').read().split('\n'))
     data_out = np.array(open('train.bpe.en').read().split('\n'))
 
-    # numpy arrays
     train_inp, val_inp, train_out, val_out = train_test_split(data_inp, data_out, test_size=3000, random_state=42)
 
     inp_vocab = Vocab(train_inp)
