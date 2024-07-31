@@ -1,7 +1,1 @@
-bpe_rules.en
-bpe_rules.ru
-data.txt
-train.bpe.en
-train.bpe.ru
-train.en
-train.ru
+train_data
