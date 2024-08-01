@@ -46,14 +46,14 @@ class Transformer(nn.Module):
         :param inputs: input sequence of token indices (batch_size, seq_len)
         :param outputs: target sequence on train and start token index on inference (batch_size, seq_len)
         """
-        device = self.fc.device
+        device = next(self.fc.parameters()).device
 
         input_embs = self.input_emb(inputs) * np.sqrt(self.d_model)  # (batch_size, seq_len, d_model)
         input_embs = self.dropout(self.pos_enc(input_embs))  # add positional embeddings
 
         inputs_padding_mask = self.inp_vocab.compute_padding_mask(inputs).unsqueeze(1)
 
-        encoder_output = input_embs
+        encoder_output = input_embs.clone()
         for layer in self.encoder:
             encoder_output = layer(encoder_output, inputs_padding_mask)
 
@@ -65,7 +65,7 @@ class Transformer(nn.Module):
         seq_len = output_embs.size(1)
         sequence_mask = torch.tril(torch.ones(seq_len, seq_len)).to(device)  # (seq_len, seq_len)
 
-        decoder_output = output_embs
+        decoder_output = output_embs.clone()
         for layer in self.decoder:
             decoder_output = layer(decoder_output, encoder_output, inputs_padding_mask, outputs_padding_mask, sequence_mask)
 
@@ -78,7 +78,7 @@ class Transformer(nn.Module):
         :param inp_text: input string processed with BPE
         :return: translated string
         """
-        device = self.fc.device
+        device = next(self.fc.parameters()).device
 
         with torch.no_grad():
             # text to tensor
@@ -88,7 +88,7 @@ class Transformer(nn.Module):
             input_embs = self.input_emb(inp_matrix) * np.sqrt(self.d_model)  # (batch_size, seq_len, d_model)
             input_embs = self.pos_enc(input_embs)  # add positional embeddings
 
-            encoder_output = input_embs
+            encoder_output = input_embs.clone()
             for layer in self.encoder:
                 encoder_output = layer(encoder_output)
 
@@ -99,12 +99,13 @@ class Transformer(nn.Module):
                 output_embs = self.output_emb(out_matrix)
                 output_embs = self.pos_enc(output_embs)
 
-                decoder_output = output_embs
+                decoder_output = output_embs.clone()
                 for layer in self.decoder:
                     decoder_output = layer(decoder_output, encoder_output)
 
                 # predict next token
-                next_token_idx = self.fc(decoder_output)[:, -1, :].argmax(dim=1).item()  # the most likely next token
+                next_token_probs = torch.softmax(self.fc(decoder_output)[0, -1, :], dim=-1).cpu().numpy()
+                next_token_idx = np.random.choice(len(self.out_vocab), p=next_token_probs)
                 if next_token_idx == self.out_vocab.eos_idx:
                     break
                 translated_tokens.append(next_token_idx)

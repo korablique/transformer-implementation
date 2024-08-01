@@ -28,18 +28,18 @@ class DecoderLayer(nn.Module):
         # masked self attention sublayer
         masked_self_attn = self.masked_self_attn(output_embs, output_embs, output_embs, outputs_padding_mask, sequence_mask)
         masked_self_attn += output_embs
-        masked_self_attn = F.dropout(masked_self_attn, p=0.1)
+        masked_self_attn = F.dropout(masked_self_attn, p=0.1, training=self.training)
         masked_self_attn = self.layer_norm1(masked_self_attn)
 
         # encoder-decoder attention sublayer
         enc_dec_attn = self.enc_dec_attn(masked_self_attn, encoder_output, encoder_output, inputs_padding_mask)
-        enc_dec_attn += output_embs
-        enc_dec_attn = F.dropout(enc_dec_attn, p=0.1)
+        enc_dec_attn += masked_self_attn
+        enc_dec_attn = F.dropout(enc_dec_attn, p=0.1, training=self.training)
         enc_dec_attn = self.layer_norm2(enc_dec_attn)
 
         # feed forward sublayer
         output = enc_dec_attn + self.ff(enc_dec_attn)
-        output = F.dropout(output, p=0.1)
+        output = F.dropout(output, p=0.1, training=self.training)
         output = self.layer_norm3(output)
 
         return output

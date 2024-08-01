@@ -29,12 +29,12 @@ class EncoderLayer(nn.Module):
         # self attention sublayer
         output = self.self_attn(input_embs, input_embs, input_embs, padding_mask)
         output += input_embs  # add residual connection
-        output = F.dropout(output, p=0.1)
+        output = F.dropout(output, p=0.1, training=self.training)
         output = self.layer_norm1(output)
 
         # feed forward sublayer
         output = output + self.ff(output)
-        output = F.dropout(output, p=0.1)
+        output = F.dropout(output, p=0.1, training=self.training)
         output = self.layer_norm2(output)
 
         return output

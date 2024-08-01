@@ -1,25 +1,21 @@
 import os
 
 import numpy as np
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-
-from sklearn.model_selection import train_test_split
-
 from nltk.tokenize import WordPunctTokenizer
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
-
-from subword_nmt.learn_bpe import learn_bpe
+from sklearn.model_selection import train_test_split
 from subword_nmt.apply_bpe import BPE
-from tqdm import trange, tqdm
+from subword_nmt.learn_bpe import learn_bpe
+from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
 
 from transformer_implementation.transformer import Transformer
 from transformer_implementation.vocab import Vocab
 
-device = 'cpu'
+device = 'cuda'
 
 tokenizer = WordPunctTokenizer()
 
@@ -98,6 +94,7 @@ def main():
             num_symbols=8000
         )
         bpe[lang] = BPE(open(os.path.join(train_data_folder, 'bpe_rules.' + lang)))
+        # save BPE rules
         with open(os.path.join(train_data_folder, 'train.bpe.' + lang), 'w') as f_out:
             for line in open(os.path.join(train_data_folder, 'train.' + lang)):
                 # apply BPE to train data
@@ -112,13 +109,6 @@ def main():
     inp_vocab = Vocab(train_inp)
     out_vocab = Vocab(train_out)
 
-    batch_size = 3
-    # TODO delete
-    train_inp = train_inp[:10]
-    val_inp = val_inp[:10]
-    train_out = train_out[:10]
-    val_out = val_out[:10]
-    # TODO end of delete
     train_dataset = TranslationDataset(train_inp, train_out)
 
     def collate_fn(data):
@@ -127,33 +117,26 @@ def main():
         out_batch = out_vocab.to_matrix(out_texts).to(device)[:, 1:]
         return inp_batch, out_batch
 
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)  # TODO make shuffle=True
+    batch_size = 128
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
     d_model = 256
 
     model = Transformer(
         inp_vocab=inp_vocab,
         out_vocab=out_vocab,
-        d_k=8, d_v=8, d_model=4, n_layers=1, n_heads=1, max_seq_len=150
-        # d_model=d_model,
-        # d_k=64,
-        # d_v=64,
-        # d_ff=512,
-        # n_layers=6,
-        # n_heads=3,
-        # max_seq_len=150
+        d_model=d_model,
+        d_k=64,
+        d_v=64,
+        d_ff=512,
+        n_layers=6,
+        n_heads=3,
+        max_seq_len=150
     ).to(device)
 
-    model.eval()
-    print('before:', model.translate(val_inp[0]))
-    # model.load_state_dict(torch.load('/home/yulia/Downloads/transformer_2024-07-22 16_41_37.545944.pt'))
-    # model.eval()
     opt = torch.optim.Adam(model.parameters(), lr=1e-3, betas=(0.9, 0.98), eps=1e-9)
 
-    # line_after_bpe = bpe['ru'].process_line('меня зовут борис')  # example
-    # compute_bleu(model, ['Меня зовут Борис', 'Лондон - столица Великобритании'], ['My name is Boris', 'London is the capital of Great Britain'])
-
-    n_epochs = 1
+    n_epochs = 100
     val_dataloader = DataLoader(TranslationDataset(val_inp, val_out), batch_size=batch_size, shuffle=False,
                                 collate_fn=collate_fn)
     current_step = 0
@@ -173,12 +156,6 @@ def main():
             opt.zero_grad()
             loss.backward()
             opt.step()
-
-            print("train_loss", loss, current_step)
-            current_step += 1
-
-            model.eval()
-            print('after 1 step:', model.translate(val_inp[0]))
 
             # validation
             if current_step % val_steps == 0:
